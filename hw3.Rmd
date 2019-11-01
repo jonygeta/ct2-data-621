@@ -1,0 +1,339 @@
+---
+title: "DATA 621---Assignment no. 3"
+author: "Critical Thinking Group 2"
+date: "October 30, 2019"
+output:
+  pdf_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(message=FALSE, warning=FALSE)
+
+# Load libraries
+library(caret)
+library(ClustOfVar)
+library(corrplot)
+library(DescTools)
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(MASS)
+library(tidyr)
+```
+
+
+# Executive Overview
+
+This paper describes our attempt to model whether a geographical zone in Boston is at risk for high crime levels. Our data set contains 466 such zones, and each zone is quantified by 12 numeric variables. The `target` variable is marked `1` for high crime areas, and `0` otherwise.
+
+We find that our variables are in four clusters: Proximity to the Charles River, the economic class of a zone's citizens, how business-industrial v. residential it is, and its status as a suburb.
+
+Four substantial models are fit. An overfit model with 28 variables performs the best on a holdout sample, although a smaller one with only 6 variables performs nearly as well. Due to correlations between most of the variables, we also used PCA transformation in one model, which performed only adequately.
+
+For the purposes of statistical inference, the conclusion of the modeling is that the proportion of a geographic zone's 'lower-status' population and concentration of nitrogen oxides are the most powerful variables to explain whether a zone has a high crime level. Both quantities are significantly and strongly related to crime levels.
+
+\vspace{3em}
+
+First, we create `train` and `test` dataframes (75 and 25 percent of the data set, respectively) using the `caret` machine learning package. The `test` data set provides an unbiased estimate of how well our models perform, and was not be used for any purpose until the very end of the modeling process.
+
+```{r, echo=FALSE}
+df <- read.csv('crime-training-data_modified.csv', stringsAsFactors=FALSE)
+
+set.seed(1804)
+train_ix <- createDataPartition(df$target, p=0.75, list=FALSE)
+train <- df[train_ix, ]
+test <- df[-train_ix, ]
+rm(df)
+
+print(paste('Rows in training data set:', nrow(train)))
+print(paste('Rows in test data set:', nrow(test)))
+```
+
+
+
+# Data Exploration
+
+The variables at hand are:
+
+| Variable | Description                
+|----------|----------------------------------------------------------------------------------------------------|
+| zn       | proportion of residential land zoned for large lots (over 25000 square feet) (predictor variable)  |
+| indus    | proportion of non-retail business acres per suburb (predictor variable)                            |
+| chas     | a dummy var. for whether the suburb borders the Charles River (1) or not (0) (predictor variable)  |
+| nox      | nitrogen oxides concentration (parts per 10 million) (predictor variable)                          |
+| rm       | average number of rooms per dwelling (predictor variable)                                          |
+| age      | proportion of owner-occupied units built prior to 1940 (predictor variable)                        |
+| dis      | weighted mean of distances to five Boston employment centers (predictor variable)                  |
+| rad      | index of accessibility to radial highways (predictor variable)                                     |
+| tax      | full-value property-tax rate per \$10,000 (predictor variable)                                      |  
+| ptratio  | pupil-teacher ratio by town (predictor variable)                                                   |
+| black    | 1000(Bk - 0.63)2 where Bk is the proportion of blacks by town (predictor variable)                 | 
+| lstat    | lower status of the population (percent) (predictor variable)                                      |
+| medv     | median value of owner-occupied homes in $1000s (predictor variable)                                |
+| target   | whether the crime rate is above the median crime rate (1) or not (0) (response variable)           |
+
+A quick summary of each:
+
+```{r, echo=FALSE}
+(train.summary <- data.frame(unclass(summary(train)), row.names = NULL))
+```
+
+There don't seem to be any outliers or missing data, so we will proceed directly to examining the variables. First, histograms of each variable by `target` class:
+
+```{r, echo=FALSE}
+train %>%
+  gather(-target, key='variable', value='value') %>%
+  ggplot(aes(x=value, group=as.factor(target), color=as.factor(target))) +
+    facet_wrap(~ variable, scales='free') +
+    geom_density()
+```
+
+Most variables have distinct shapes for each `target` class, suggesting that they will have good discriminative ability. `chas` and `zn` are quite skewed, and do not appear terribly informative. `indus` and `tax` have two peaks for `target = 1`, which hints that there may be two seperate processes at work there.
+
+As would be expected, many of these variables are correlated with each other:
+
+```{r, echo=FALSE}
+corrplot(cor(train), type='upper', method='number', order='hclust', number.cex=0.55)
+```
+
+Obviously, the concentration of industry is strongly and positively correlated with nitrogen oxide concentration ($r = 0.78$). Parent-teacher ratio is negatively correlated with median property values ($r = -0.5$), and positively correlated with property taxes ($r = 0.49$).
+
+A further way to understand how these variables may be related is to use the `ClustOfVar` package. It provides a function to use hierarchical clustering of the independent variables:
+
+```{r, echo=FALSE}
+plot(hclustvar(train[1:12]))
+```
+
+There are four major groups of variables:
+
+1. _Charles River_ --- Whether the geographical zone borders the Charles River or not is its own cluster. This is consistent with the correlation chart presented above, showing that `chase` was only weakly correlated with other variables.
+
+2. _Economic Class_ --- The average number of rooms per dwelling, the 'lower status of the population' percent, and the median value of homes in the zone, are the second cluster. These appear to directly relate to economic class. Wealthier areas have larger homes and lower proportions of 'lower-status' populations.
+
+3. _Industrial-Business v. Residential_ -- This cluster is composed of the weighted mean of distance to employment center, the nitrogen oxides concentration, and the proportions of residential land zoned for large lots, of non-retail business acres, and of older homes. It seems to represent whether a zone is primarily industrial-business, or residential.
+
+4. _Suburban_ -- Made up of the pupil-teacher ratio, an index of accessibility to the highway, and the property tax. We propose this cluster is composed of variables that distinguish whether a zone is suburban or otherwise.
+
+This exercise will inform our modeling, allowing us to avoid including highly correlated variables in the model.\footnote{Although it is not clear from our reading that logistic regression has this same constraint as linear regression!}
+
+Toward that end, we can directly observe the relationships between each independent variable and `target`, with the blue line representing a linear fit:
+
+```{r, echo=FALSE}
+train %>%
+  gather(-target, key='variable', value='value') %>%
+  ggplot(aes(x=value, y=as.factor(target), group=1)) +
+    geom_point() +
+    geom_smooth(method='lm',  size=.75) +
+    facet_wrap(~ variable, scales='free')
+```
+
+Most of these variables appear very strongly related to the dependent variable. Most of these relationships make sense: Geographical zones that are more industrial suffer from increases crime, higher parent ratio is correlated with higher crime levels, etc.
+
+The property tax variables, `tax`, is counter-intuitive, however. The plot is essentially suggesting crime is associted with wealthier neighbhorhoods! Perhaps controlling for the other variables statistically will straighten this relationship out.
+
+
+
+# Data Preparation
+
+No data prepartion was necessary, as there neither missing data points or outliers. Furthermore, the distributions of each variable is normal enough, and does warrent transformation (for the most part).
+
+
+
+# Modeling
+
+In this section, we will fit a number of models on the training data. The 'winning' model will be selected according to its $F1$ score on the test data. Along the way, we will also examine important metrics about how each model fit the training dataset, including a confusion matrix. We will also use Nagelkerke's measure of $R^2$ for logistic regression, via the `DescTools::PseudoR2()` function.
+
+## $M_0$: Dummy model
+
+This first model just predicts the class proportion, which is nearly balanced between the two classes. If we are having trouble improving on this model, we know we are far off and should re-examine our assumptions.
+
+Ommitting the full confusion matrxi, this dummy model has an accuracy of about 0.50, a sensitivity of 1, and specificity of 0. Since it has zero predictive power, we know that it has a pseudo-$R^2$ of 0. Its $F1$ score is 0.67.
+
+```{r}
+m_0 <- glm(target ~ 1, train, family=binomial())
+```
+
+```{r, echo=FALSE}
+pred_0 <- factor(round(predict(m_0, train, type='response')), levels=c('0', '1'))
+m_0_cm <- caret::confusionMatrix(data=pred_0, reference=factor(train$target, levels=c('0', '1')))
+m_0_cm$byClass['F1']
+```
+
+
+
+## $M_1$: Full model
+
+The next simplest possible model simply uses all available data, without transformations or interactions or polynomials:
+
+```{r}
+m_1 <- glm(target ~ zn + indus + chas + nox + rm + age + dis + rad + tax +
+             ptratio + lstat + medv, train, family=binomial())
+summary(m_1)
+```
+
+A few variables come out highly significant. Our issue with `tax` has been fixed: there is now a negative relationship, whereas a positive was plotted. Evaluation:
+
+```{r, echo=FALSE}
+pred_1 <- factor(round(predict(m_1, train, type='response')), levels=c('0', '1'))
+m_1_cm <- caret::confusionMatrix(data=pred_1, reference=factor(train$target, levels=c('0', '1')))
+m_1_cm$byClass['F1']
+PseudoR2(m_1, which = 'Nagelkerke')
+m_1_cm
+```
+
+The full model has very high $F1$ and $R^2$ scores. The confusion metrics also look very nice.
+
+
+
+## $M_2$: Stepwise variable selection with interactions
+
+We could stop here, although we know that variable interaction is likely. We can automatically test all interactions using stepwise selection:
+
+```{r}
+m_2 <- stepAIC(m_1, trace=0, scope=list(upper = ~ zn * indus * chas * nox * rm * 
+                                          age * dis * rad * tax * ptratio * 
+                                          lstat*medv, lower= ~1))
+```
+
+However, this model is almost certainly overfit. We've ommitted the model summary, as none of the parameters are signficant. Naturally, the $F1$ and $R^2$ values are impossibly high.
+
+```{r, echo=FALSE}
+pred_2 <- factor(round(predict(m_2, train, type='response')), levels=c('0', '1'))
+m_2_cm <- caret::confusionMatrix(data=pred_2, reference=factor(train$target, levels=c('0', '1')))
+m_2_cm$byClass['F1']
+PseudoR2(m_2, which = 'Nagelkerke')
+```
+
+By a common heuristic, we have enough data for:
+
+```{r}
+min(table(train$target)) / 15
+```
+
+i.e., 12 variables. The next model tries to par them down while keeping important interaction effects.
+
+
+
+## $M_3$: Interactions, part II
+
+We need a way to include interactions without using so many variables. To this end, this model uses only one variable of each variable cluster from above, plus their interactions. The variables highest in absolute correlation with `target` was chosen from each group. The `chas` variable was dropped entirely.
+
+```{r}
+m_3 <- glm(target ~ lstat*nox + lstat*rad + nox*rad, train, family=binomial())
+summary(m_3)
+```
+
+Strangely, `rad` was not found significant at any reasonable level. Nor was the `nox:rad` interaction. The other two interactions were both significant at at least $p < .05$. Evaluation:
+
+```{r, echo=FALSE}
+pred_3 <- factor(round(predict(m_3, train, type='response')), levels=c('0', '1'))
+m_3_cm <- caret::confusionMatrix(data=pred_3, reference=factor(train$target, levels=c('0', '1')))
+m_3_cm$byClass['F1']
+PseudoR2(m_3, which = 'Nagelkerke')
+m_3_cm
+```
+
+Both $F1$ and $R^2$ are very close to the full model $M_1$, and with only 6 variables!
+
+
+
+## $M_4$: PCA
+
+Given all of the correlations between the variables, it makes sense to attempt PCA on this data set.
+
+```{r}
+pca <- prcomp(train[,1:12], retx=TRUE, center=TRUE, scale=TRUE)
+summary(pca)
+```
+
+Since we know from above there are four main groups of varaibles, and the first four components account for 80 percent of variation, we use those for modeling:
+
+```{r}
+pca_df <- as.data.frame(cbind(train$target, pca$x[,1:4]))
+colnames(pca_df) <- c('target', 'PC1', 'PC2' ,'PC3', 'PC4')
+m_4 <- glm(target ~ ., pca_df, family=binomial())
+summary(m_4)
+```
+
+The first three components are highly significant, and negatively related to crime level. Examine its metrics:
+
+```{r, echo=FALSE}
+pred_4 <- factor(round(predict(m_4, pca_df, type='response')), levels=c('0', '1'))
+m_4_cm <- caret::confusionMatrix(data=pred_4, reference=factor(train$target, levels=c('0', '1')))
+m_4_cm$byClass['F1']
+PseudoR2(m_4, which = 'Nagelkerke')
+m_4_cm
+```
+
+There is similar performance to previous models, although the $F1$ is higher and the $R^2$ lower compared to $M_3$.
+
+
+
+# Evaluating the Models on the Test Set
+
+Evaluate each model based on its $F1$ score on the test set, although we include other metrics as a convenianceS:
+
+```{r}
+# pred_0_test <- factor(round(predict(m_0, test, type='response')), levels=c('0', '1'))
+# m_0_test <- caret::confusionMatrix(data=pred_0_test, reference=factor(test$target, levels=c('0', '1')))
+# m_0_test$byClass['F1']
+# 
+# pred_1_test <- factor(round(predict(m_1, test, type='response')), levels=c('0', '1'))
+# m_1_test <- caret::confusionMatrix(data=pred_1_test, reference=factor(test$target, levels=c('0', '1')))
+# m_1_test$byClass['F1']
+# 
+# pred_2_test <- factor(round(predict(m_2, test, type='response')), levels=c('0', '1'))
+# m_2_test <- caret::confusionMatrix(data=pred_2_test, reference=factor(test$target, levels=c('0', '1')))
+# m_2_test$byClass['F1']
+# 
+# pred_3_test <- factor(round(predict(m_3, test, type='response')), levels=c('0', '1'))
+# m_3_test <- caret::confusionMatrix(data=pred_3_test, reference=factor(test$target, levels=c('0', '1')))
+# m_3_test$byClass['F1']
+# 
+# pred_4_test <- factor(round(predict(m_4, as.data.frame(predict(pca, newdata=test)), type='response')),
+#                       levels=c('0', '1'))
+# m_4_test <- caret::confusionMatrix(data=pred_4_test, reference=factor(test$target, levels=c('0', '1')))
+# m_4_test$byClass['F1']
+```
+
+|       | Description                |         F1 |   Accuracy | Sensitivity | Specificity |
+|------:|----------------------------|-----------:|-----------:|------------:|------------:|
+| $M_0$ | dummy                      |     0.6966 |    0.53448 |      1.0000 |      0.0000 |
+| $M_1$ | full                       |     0.9076 |     0.8965 |  **0.9516** |      0.8333 |
+| $M_2$ | all + interactions         | **0.9344** | **0.9310** |      0.9193 |  **0.9444** |
+| $M_3$ | parred down + interactions |     0.8615 |     0.8448 |      0.9032 |      0.7777 |
+| $M_4$ | PCA                        |     0.8062 |     0.7844 |      0.8387 |      0.7222 |
+
+All of our models performed significantly better than the dummy model. This shows that implementing this model for some purpose would make sense.
+
+Surpisingly, the large model with all variables plus all their interactions proved to be _not_ overfit, even though it was composed of almost entirely insignicant variables. This model also beat all the others on accuracy and specificity. The full model also performed very well.
+
+The PCA model $M_4$ was the weakest of our serious models. It also suffers from the issue of not being as interpretable.
+
+## Inference on the Final Model
+
+Since $M_2$ performed the best on the test data set, it makes sense to use it if out purposes are purely predictive. However, it is remarkable that a model with only 6 variables could come so close to one with 28. For purposes of inference, it makes sense to use $M_3$.
+
+Re-running on the full model:
+
+```{r}
+df <- rbind(train, test)
+m_3_star <- glm(target ~ lstat*nox + lstat*rad + nox*rad, df, family=binomial())
+summary(m_3_star)
+```
+
+Transforming the coefficients:
+
+```{r}
+format(exp(coef(m_3_star)), scientific=FALSE)
+```
+
+The intercept is highly significant, and for once makes sense with this data set. If a geographic zones contains 0 `lower status` population, no nitrous oxide, and is directly accessible to the highway, we can expect it to have `target=0` on average.
+
+This data does not provide sufficient evidence to reject the null hypotheses that the coefficents for `rad` is 0, nor that the interaction between `nox` and `rad` is 0.
+
+We have found that there is a positive relationship between `lstat`, the porportion of 'lower status' population, and crime levels. When `nox` and `rad` are zero, each additional percentage point of `lstat` increases the odds of high crime levels by 114 percent. The interaction effects show that the effect of `lstat` decreases as `nox` and `rad` increase.
+
+`nox` has a very strong effect on whether a geographic zone suffers from high crime levels. It seems to suggest that each additional part per million of nitrogen oxides concentration increases the odds of high crime level by an almost absurd amount. It is worth noting that other models, including $M_1$, returned similarly large estimated coefficients.
+

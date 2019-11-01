@@ -1,0 +1,255 @@
+---
+title: "DATA 621---Assignment no. 3"
+author: "Critical Thinking Group 2"
+date: "October 30, 2019"
+output:
+  pdf_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(message=FALSE, warning=FALSE)
+# Load libraries
+library(caret)
+library(corrplot)
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(MASS)
+library(tidyr)
+```
+
+
+# Executive Overview
+
+
+In this homework assignment, you will explore, analyze and model a data set containing information on crime for various neighborhoods of a major city. Each record has a response variable indicating whether or not the crime rate is above the median crime rate (1) or not (0).
+
+
+Your objective is to build a binary logistic regression model on the training data set to predict whether the neighborhood will be at risk for high crime levels.
+
+Below is a short description of the variables of interest in the data set:
+
+
+| Variable | Description                
+|----------|----------------------------------------------------------------------------------------------------|
+| zn       | proportion of residential land zoned for large lots (over 25000 square feet) (predictor variable)  |
+| indus    | proportion of non-retail business acres per suburb (predictor variable)                            |
+| chas     | a dummy var. for whether the suburb borders the Charles River (1) or not (0) (predictor variable)  |
+| nox      | nitrogen oxides concentration (parts per 10 million) (predictor variable)                          |
+| rm       | average number of rooms per dwelling (predictor variable)                                          |
+| age      | proportion of owner-occupied units built prior to 1940 (predictor variable)                        |
+| dis      | weighted mean of distances to five Boston employment centers (predictor variable)                  |
+| rad      | index of accessibility to radial highways (predictor variable)                                     |
+| tax      | full-value property-tax rate per $10,000 (predictor variable)                                      |  
+| ptratio  | pupil-teacher ratio by town (predictor variable)                                                   |
+| black    | 1000(Bk - 0.63)2 where Bk is the proportion of blacks by town (predictor variable)                 | 
+| lstat    | lower status of the population (percent) (predictor variable)                                      |
+| medv     | median value of owner-occupied homes in $1000s (predictor variable)                                |
+| target   | whether the crime rate is above the median crime rate (1) or not (0) (response variable)           |
+
+
+Create train and test sets using the `caret` machine learning package:
+
+__Only use the `train` data frame until the very end of the process, when we use test to evaluate how effective the model is!__
+
+```{r}
+df <- read.csv('crime-training-data_modified.csv', stringsAsFactors=FALSE)
+set.seed(1804)
+#80% train, 20% test split
+train_ix <- createDataPartition(df$target, p=0.8, list=FALSE) 
+train <- df[train_ix, ]
+test <- df[-train_ix, ]
+rm(df)
+```
+
+# Data Exploration
+
+Below is descriptive statistic of the variables. There are no NA values. 
+
+```{r}
+(train.summary <- data.frame(unclass(summary(train)), row.names = NULL))
+```
+
+There don't seem to be any outliers or missing data, so we will proceed directly to examining the variables. First, histograms of each variable for each `target` class:
+
+```{r}
+train %>%
+  gather(-target, key='variable', value='value') %>%
+  ggplot(aes(x=value, group=target, color=target)) +
+    facet_wrap(~ variable, scales='free') +
+    geom_density()
+```
+
+Most variables have distinct shapes for each `target` class. `chas` and `zn` are quite skewed, and do not appear terribly informative. `indus` and `tax` have two peaks for `target = 1`, indicating there are two seperate processes at work there.
+
+```{r}
+ggplot(train, aes(x=jitter(nox), y=jitter(as.numeric(target)))) + 
+  geom_point() + 
+  geom_smooth() + 
+  geom_smooth(method='lm', color='red')
+```
+
+It is to be expected that many of these variables will be correlated with each other:
+
+```{r}
+corrplot(cor(train), type='upper', method='number', order='hclust')
+```
+
+Obviously, the concentration of industry is strongly and positively correlated with nitrogen oxide concentration $\rho= 0.78$). Parent-teacher ratio is negatively correlated with median property values ($\rho = -0.5$), and positively correlated with property taxes ($\rho = 0.49$). What these and other variables are really getting at is _economic class_. Each measures a different phenomenon, but can be conceived of as operationalizing one thing. This suggests PCA may be useful on this dataset.
+
+## Checking for interactions
+
+Given the high correlation between the variables, it may be the case that there are numerous interactions that can improve our modeling. In this section, we attempt to determine if this is the case. We will group numeric variables by membership in quartile, and examine line plots.
+
+```{r}
+calc_percentile <- function(x){
+  trunc(rank(x)) / length(x)
+}
+```
+
+
+# Data Preparation
+
+
+
+
+# Modeling
+
+Function to calculate McFadden's pseudo-$R^2$ for logistic models:
+
+```{r}
+calc_r2 <- function(model) {
+  1 - model$deviance / model$null.deviance
+}
+```
+
+## $M_0$: Dummy model
+
+Baseline model, which just predicts the class proportion, which is nearly balanced between the two classes. If we are having trouble improving on this model, we know we are doing something wrong.
+
+This dummy model has an accuracy of about 0.50, sensitivity of 1, and specificity of 0. Since it has zero predictive power, we know that it has a pseudo-$R^2$ of 0.
+
+```{r}
+m_0 <- glm(target ~ 1, train, family=binomial())
+pred_0 <- factor(round(predict(m_0, train, type='response')), levels=c('0', '1'))
+confusionMatrix(data=pred_0, reference=factor(train$target, levels=c('0', '1')))
+```
+
+
+## $M_1$: Full model
+
+The next simplest model uses all available data, without transformations or interactions or polynomials:
+
+```{r}
+m_1 <- glm(target ~ zn + indus + chas + nox + rm + age + dis + rad + tax + ptratio + lstat + medv, train, family=binomial())
+pred_1 <- factor(round(predict(m_1, train, type='response')), levels=c('0', '1'))
+calc_r2(m_1)
+confusionMatrix(data=pred_1, reference=factor(train$target, levels=c('0', '1')))
+```
+
+
+## $M_2$: Stepwise variable selection with interactions
+
+We know that variable interaction is probably likely. We can automatically test all interactions using stepwise selection:
+
+```{r}
+m_2 <- stepAIC(m_1, trace=0, scope=list(upper = ~ zn * indus * chas * nox * rm * 
+                                          age * dis * rad * tax * ptratio * 
+                                          lstat*medv, lower= ~1))
+summary(m_2)
+```
+
+However, this model is probably overfit. By common heuristic, we have enough data for:
+
+```{r}
+min(table(train$target)) / 15
+```
+
+i.e., 12 variables.
+
+
+
+## $M_3$: Adjusting for multiple significance tests
+
+To correct for this overfitting, we will use the `p.adjust` function to revise our p-values, and then use those that remain significant at $p = 0.05$ for the next model:
+
+```{r}
+m_2_p <- summary(m_2)$coefficients[,4] 
+sort(p.adjust(m_2_p))
+```
+
+Using the top values (including any variable as well as interaction effect:
+
+```{r}
+m_3 <- glm(target ~ age*rm + rad + age*medv, train, family=binomial())
+pred_3 <- factor(round(predict(m_3, train, type='response')), levels=c('0', '1'))
+confusionMatrix(data=pred_3, reference=factor(train$target, levels=c('0', '1')))
+calc_r2(m_3)
+```
+
+The psuedo-$R^2$ is naturally much less than the overfit $M_2$. Presumably, it will be better fit to the hold-out sample, however. We do see theat sensitivity, specificity, and pos/neg predictive value are actually still pretty strong. As expected and required, all variables are extremely significant.
+
+```{r}
+summary(m_3)
+```
+
+## $M_4$: Previous model + a few more predictors
+
+We noted above that we have data for up to 12 variables in this model, so I will include the first 12 significant variables of the p-value adjustment:
+
+```{r}
+m_4 <- glm(target ~ age*rm + rad + age*medv +
+             indus*tax + dis*tax + nox*age + zn, train, family=binomial())
+pred_4 <- factor(round(predict(m_4, train, type='response')), levels=c('0', '1'))
+confusionMatrix(data=pred_4, reference=factor(train$target, levels=c('0', '1')))
+calc_r2(m_4)
+```
+
+Despite adding all these variables, we see that the confusion matrix evaluations are not that much higher. Psuedo-$R^2$ did take a nice bump, though. Nonetheless, it is possible that this model does not fit the hold out sample as well as $M_3$.
+
+```{r}
+summary(m_4)
+```
+
+
+
+## $M_5$: PCA
+
+```{r}
+pca <- prcomp(train[,1:12], retx=TRUE, center=TRUE, scale=TRUE)
+summary(pca)
+```
+
+The first five account for 87 percent of variation, so we will use those for modeling:
+
+```{r}
+pca_df <- as.data.frame(cbind(train$target, pca$x[,1:5]))
+colnames(pca_df) <- c('target', 'PC1', 'PC2' ,'PC3', 'PC4', 'PC5')
+m_5 <- glm(target ~ ., pca_df, family=binomial())
+pred_5 <- factor(round(predict(m_5, pca_df, type='response')), levels=c('0', '1'))
+confusionMatrix(data=pred_5, reference=factor(train$target, levels=c('0', '1')))
+calc_r2(m_5)
+```
+
+This model has similar confusion matrix evaluation values as some models above, though it's psuedo-$R^2$ value is a bit low.
+
+The results of this exercise with PCA seem to suggests there are three seperate 'clusters' of phenomenon that affect crime level, at least at a statistically significant level. All three are negative related.
+
+```{r}
+summary(m_5)
+```
+
+
+# Evaluating the Models on the Test Set
+
+```{r}
+# Don't run until the very end
+# confusionMatrix(data=predict(model, test), reference=test$target)
+# Evaluate on F1 score
+# For PCA prediction:
+# pred_xx <- factor(round(predict(m_5, as.data.frame(predict(pca, newdata=test)), type='response')), levels=c('0', '1'))
+```
+
+
+## Analysis of Final Model
